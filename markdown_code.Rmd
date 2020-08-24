@@ -1,0 +1,1349 @@
+---
+title: ''
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 資料來源與目的
+
+以2015年大不列顛島(Great Britain)的道路安全資料為基礎進行探索性分析(EDA), 期望從資料中找出導致死亡意外的變因, 並建立基礎預測模型。
+
+資料來源 <https://data.gov.uk/dataset/cb7ae6f0-4be6-4935-9277-47e5ce24a11f/road-safety-data>.
+
+包含三個資料檔案
+
+- Accidents_2015.csv
+- Casualties_2015.csv
+- Vehicles_2015.csv
+
+### 分析架構
+
+1. 資料整合, 異常值處理與分佈, 變項分類與選擇, 基本時間變項處理
+2. 基礎變項檢定    
+3. 地理資訊萃取    
+4. 地理資訊整合    
+4.1 地理資訊與時間資訊整合 
+4.2 時間資訊整合 
+5. 建立基本預測模型與優化
+
+
+### 資料整合
+
+將三份檔案以`Accident_Index`為單位整合, 其中 `Casualties_2015.csv` , `Vehicles_2015.csv` 具有重複的`Accident_Index`, 因為若遇此情形則隨機挑選重複`Accident_Index`中一筆作為代表資料
+
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+#============20200730===============#
+
+Acc_file <-"/home/rstudio/test/Accidents_2015.csv"
+Cas_file <-"/home/rstudio/test/Casualties_2015.csv"
+Veh_file <-"/home/rstudio/test/Vehicles_2015.csv"
+
+
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(readODS)
+library(lubridate)
+library(knitr)
+library(DT)
+library(ggpubr)
+library(gridExtra)
+
+dd <- read_csv(Acc_file) 
+my_y <- "Accident_Severity"
+
+cats1  <- c("Police_Force","Accident_Severity","Local_Authority_(District)","Local_Authority_(Highway)",
+            "1st_Road_Class","Road_Type", "Junction_Detail","Junction_Control", "2nd_Road_Class", 
+            "Pedestrian_Crossing-Human_Control", "Pedestrian_Crossing-Physical_Facilities",
+            "Light_Conditions", "Weather_Conditions", "Road_Surface_Conditions",
+            "Special_Conditions_at_Site", "Carriageway_Hazards", "Urban_or_Rural_Area", 
+            "Did_Police_Officer_Attend_Scene_of_Accident", "LSOA_of_Accident_Location"
+)
+
+
+conti1 <- c("Number_of_Vehicles","Number_of_Casualties", "Speed_limit")
+dates <- c("Date","Day_of_Week", "Time" )
+unsure <- c("1st_Road_Number", "2nd_Road_Number")
+
+
+###########################################################
+casualties <- read_csv(Cas_file) 
+
+
+cats2  <- c("Casualty_Class","Sex_of_Casualty","Pedestrian_Location","Pedestrian_Movement",
+            "Casualty_Severity","Car_Passenger","Bus_or_Coach_Passenger","Pedestrian_Road_Maintenance_Worker",
+            "Casualty_Type","Casualty_Home_Area_Type")
+
+conti2 <- c("Vehicle_Reference","Casualty_Reference","Age_of_Casualty","Age_Band_of_Casualty")
+
+
+
+vehicle <- read_csv(Veh_file) 
+
+
+
+cats3<-c("Vehicle_Type","Towing_and_Articulation","Vehicle_Manoeuvre","Vehicle_Location-Restricted_Lane",
+         "Junction_Location","Skidding_and_Overturning","Hit_Object_in_Carriageway","Vehicle_Leaving_Carriageway",
+         "Hit_Object_off_Carriageway","1st_Point_of_Impact","1st_Point_of_Impact","Journey_Purpose_of_Driver",
+         "Sex_of_Driver","Propulsion_Code","Driver_IMD_Decile","Driver_Home_Area_Type")
+
+
+conti3<-c("Vehicle_Reference","Age_of_Vehicle","Engine_Capacity_(CC)",
+          "Age_of_Driver","Age_Band_of_Driver")
+
+
+
+
+```
+
+
+
+#### `Accident_Index` 異常值處理與分佈
+
+
+#### `casualties.csv` 重複 `Accident_Index` 分佈
+
+- 絕大多數(109395組)`Accident_Index`於`casualties.csv`沒有重複
+- 21138組`Accident_Index`於資料中具有兩筆重複
+- 其餘`Accident_Index`於`casualties.csv`有3到38次不等的重複次數, 其中1組具有38筆重複
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+tmp_tbl <- casualties$Accident_Index %>% table %>% table %>% as.data.frame 
+colnames(tmp_tbl) <- c("Accident_Index重複數", "Accident_Index數")
+
+kable(tmp_tbl%>% arrange( desc(Accident_Index重複數) ) )
+```
+
+
+#### `vehicle.csv` 重複 `Accident_Index` 分佈
+
+- 絕大多數(84615組)`Accident_Index`於`vehicle.csv`具有2組重複
+- 41116組`Accident_Index`於資料中沒有重複
+- 其餘`Accident_Index`於`vehicle.csv`有3到37次不等的重複次數, 其中1組具有37筆重複
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+tmp_tbl <- vehicle$Accident_Index %>% table %>% table %>% as.data.frame %>% arrange(Freq)
+colnames(tmp_tbl) <- c("Accident_Index重複數", "Accident_Index數")
+kable(tmp_tbl%>% arrange( desc(Accident_Index重複數) ))
+
+```
+
+### 初步資料整合
+
+完成3份檔案初步整合具有140,056筆 `Accident_Index`資料
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+
+
+vehicle = vehicle[,!(names(vehicle) %in% "Vehicle_Reference")]
+
+#delete dupliecated data in casualties and vehicle
+casualties1<-casualties[!duplicated(casualties$Accident_Index),]
+vehicle1<-vehicle[!duplicated(vehicle$Accident_Index),]
+
+totaldata <- Reduce(function(x,y) merge(x,y,by='Accident_Index', all.x=TRUE), list(dd,casualties1,vehicle1))
+
+
+```
+
+
+確認預測目標"是否致死(fatal, nonfatal)"的分佈,可以發現沒有造死亡的意外(nonfatal)佔了絕大多數(99%), 預測的目標是在資料集中極為不平衡的變數
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+x=as.POSIXct(strptime(c("000000","050000","110000","160000","190000","235959"),
+                      "%H%M%S"),"UTC") #for time_of_day
+labs=c("night","morning","afternoon","evening","night") #for time_of_day
+
+totaldata<- totaldata %>%
+  mutate(fatal=ifelse(Accident_Severity==1,1,0), #fatal=1, other=0
+         time_hms=as.POSIXct(strptime(totaldata$Time,format="%H:%M:%S"),"UTC"), #character to hhmmss
+         weekday=ifelse(Day_of_Week %in% c(1:5),1,0)) %>% #weekday=1, weekend=0
+  mutate(time_of_day=labs[findInterval(time_hms,x)]) # time of day
+
+tmp_tbl <- totaldata %>% select(fatal) %>% table %>% prop.table()
+names(tmp_tbl) = c("nonfatal(99%), n =138440", "fatal(1%), n=1616")
+barplot(tmp_tbl)
+```
+
+### 單變數分析
+
+將分別將三份檔案中的變項分類為類別變項與連續型變項後以合適的統計檢定方式(t-test, chi-square)檢定與是否致死意外相關
+
+### 類別變數分析
+
+首先是類別變數與是否死亡進行卡方檢定,可以發現在39個類別變數中僅有**3個變數無達到統計顯著**,
+
+分別是
+
+- Pedestrian_Crossing-Human_Control
+- Special_Conditions_at_Site
+- Carriageway_Hazards
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+newvar<-c("fatal","weekday","time_of_day")
+cats_table <-totaldata[,names(totaldata) %in% c(newvar,cats1[-2],cats2,cats3)]  #%>% as.matrix() %>% as_tibble()
+cats_table1<-cats_table[,c("fatal",
+                             "1st_Road_Class", "Road_Type", "Junction_Detail", 
+                            "Junction_Control", "2nd_Road_Class", "Pedestrian_Crossing-Human_Control", 
+                            "Pedestrian_Crossing-Physical_Facilities", "Light_Conditions", 
+                            "Weather_Conditions", "Road_Surface_Conditions", "Special_Conditions_at_Site", 
+                            "Carriageway_Hazards", "Urban_or_Rural_Area", "Did_Police_Officer_Attend_Scene_of_Accident", 
+                             "Casualty_Class", "Sex_of_Casualty", 
+                            "Pedestrian_Location", "Pedestrian_Movement", 
+                            "Car_Passenger", "Bus_or_Coach_Passenger", "Pedestrian_Road_Maintenance_Worker", 
+                            "Casualty_Type", "Casualty_Home_Area_Type", "Vehicle_Type", "Towing_and_Articulation", 
+                            "Vehicle_Manoeuvre", "Vehicle_Location-Restricted_Lane", "Junction_Location", 
+                            "Skidding_and_Overturning", "Hit_Object_in_Carriageway", "Vehicle_Leaving_Carriageway", 
+                            "Hit_Object_off_Carriageway", "1st_Point_of_Impact", "Journey_Purpose_of_Driver", 
+                            "Sex_of_Driver", "Propulsion_Code", "Driver_Home_Area_Type", 
+                             "weekday", "time_of_day")]
+#"Driver_IMD_Decile" 都是-1,因此移除於分析變項中
+
+chisqtable<-data.frame(var=c(),pvalue=c())
+#類別變數與fatal的卡方檢定分析
+for (i in 2:length(names(cats_table1))) {
+chisqtmp<-cbind(names(cats_table1)[i],chisq.test(cats_table1$fatal,cats_table1[[names(cats_table1)[i]]])$p.value)
+chisqtable<-rbind(chisqtable,chisqtmp)
+}
+names(chisqtable)<-c("var","pvalue")
+chisqtable$pvalue<-as.numeric(as.character(chisqtable$pvalue))
+chisqtable$significance<-ifelse(chisqtable$pvalue<0.05,1,0)
+chisqtable$pvalue<-ifelse(chisqtable$sig==1,"<0.05",">0.05")
+
+
+kable(chisqtable)
+```
+
+### 類別變數分析 (1)
+
+
+
+- 左上呈現車禍地點與fatal的相關性,可以明顯觀察到死亡的車禍較常發生在`鄉村(rural)`的地區
+- 左下呈現發生死亡車禍的傷者性別以`男性`為主 (79% vs. 62%)
+- 右上呈現死亡車禍中`行人(Pedestrian)`比例是高於非死亡車禍的 (24% vs. 16%)
+
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+
+cats_table1[cats_table1 < 0] <- NA
+
+
+cats_freq_table<-c()
+
+for ( i in colnames(cats_table1)[-1]) {
+  temp_cats<-as.data.frame(prop.table(table(cats_table1[[i]],cats_table1[["fatal"]]),margin=2))
+  temp_cats$var<-i
+  cats_freq_table<-rbind(cats_freq_table,temp_cats)
+  rm(temp_cats)
+}
+
+cats_freq_table$percent<-round(cats_freq_table$Freq,5)*100
+cats_freq_table$percent1<-paste0(round(cats_freq_table$Freq,2)*100,"%")
+
+
+#畫出類別少且有顯著差異的變數
+sig_cat_var<-c("Urban_or_Rural_Area","Casualty_Class","Sex_of_Casualty","Car_Passenger",
+               "Did_Police_Officer_Attend_Scene_of_Accident","Sex_of_Driver",
+               "time_of_day")
+
+cats_freq_table1<-cats_freq_table %>% filter(var %in% sig_cat_var) %>%
+  mutate(pos=case_when(var=="Urban_or_Rural_Area" &Var1==1&Var2==0~75,
+                       var=="Urban_or_Rural_Area" &Var1==2 &Var2==0~20,
+                       var=="Urban_or_Rural_Area" &Var1==1&Var2==1~75,
+                       var=="Urban_or_Rural_Area" &Var1==2 &Var2==1~25,
+                       
+                       var=="Casualty_Class" &Var1==1&Var2==0~60,
+                       var=="Casualty_Class" &Var1==2 &Var2==0~20,
+                       var=="Casualty_Class" &Var1==3 &Var2==0~8,
+                       var=="Casualty_Class" &Var1==1&Var2==1~60,
+                       var=="Casualty_Class" &Var1==2 &Var2==1~25,
+                       var=="Casualty_Class" &Var1==3 &Var2==1~10,
+                       
+                       var=="Sex_of_Casualty" &Var1==1&Var2==0~75,
+                       var=="Sex_of_Casualty" &Var1==2 &Var2==0~25,
+                       var=="Sex_of_Casualty" &Var1==1&Var2==1~50,
+                       var=="Sex_of_Casualty" &Var1==2 &Var2==1~10,
+                       
+                       var=="Car_Passenger" &Var1==1&Var2==0~97,
+                       var=="Car_Passenger" &Var1==2 &Var2==0~94,
+                       var=="Car_Passenger" &Var1==0 &Var2==0~50,
+                       var=="Car_Passenger" &Var1==1&Var2==1~98,
+                       var=="Car_Passenger" &Var1==2 &Var2==1~92,
+                       var=="Car_Passenger" &Var1==0 &Var2==1~50,
+                       
+                       var=="Did_Police_Officer_Attend_Scene_of_Accident" &Var1==1&Var2==0~60,
+                       var=="Did_Police_Officer_Attend_Scene_of_Accident" &Var1==2 &Var2==0~12.5,
+                       var=="Did_Police_Officer_Attend_Scene_of_Accident" &Var1==3 &Var2==0~0,
+                       var=="Did_Police_Officer_Attend_Scene_of_Accident" &Var1==1&Var2==1~50,
+                       var=="Did_Police_Officer_Attend_Scene_of_Accident" &Var1==2 &Var2==1~5,
+                       var=="Did_Police_Officer_Attend_Scene_of_Accident" &Var1==3 &Var2==1~0,
+                       
+                       
+                       var=="Sex_of_Driver" &Var1==1&Var2==0~60,
+                       var=="Sex_of_Driver" &Var1==2 &Var2==0~20,
+                       var=="Sex_of_Driver" &Var1==3 &Var2==0~5,
+                       var=="Sex_of_Driver" &Var1==1&Var2==1~50,
+                       var=="Sex_of_Driver" &Var1==2 &Var2==1~8,
+                       var=="Sex_of_Driver" &Var1==3 &Var2==1~0,
+                       
+                       
+                       var=="time_of_day" &Var1=="afternoon"&Var2==0~80,
+                       var=="time_of_day" &Var1=="evening" &Var2==0~60,
+                       var=="time_of_day" &Var1=="morning" &Var2==0~35,
+                       var=="time_of_day" &Var1=="night"&Var2==0~12.5,
+                       var=="time_of_day" &Var1=="afternoon"&Var2==1~80,
+                       var=="time_of_day" &Var1=="evening" &Var2==1~60,
+                       var=="time_of_day" &Var1=="morning" &Var2==1~40,
+                       var=="time_of_day" &Var1=="night" &Var2==1~20
+  )) %>%
+  mutate(var=replace(var, var=="Did_Police_Officer_Attend_Scene_of_Accident", "police")) 
+
+
+
+sig_cat_var1<-c("Urban_or_Rural_Area","Casualty_Class","Sex_of_Casualty","Car_Passenger",
+               "police","Sex_of_Driver",
+               "time_of_day")
+
+stackplot<-function(x) {
+  plot<-cats_freq_table1 %>% filter (var==x)
+  
+  df.plot <- ggplot(data = plot, aes(x = Var2, y = percent, fill = Var1)) +
+    geom_bar(stat="identity")+ xlab ("fatal") +
+   geom_text(aes(label=percent1, y = pos), size = 4)
+  #df.plot+guides(color=guide_legend(title="Whatever You Want")) legend title尚待修改以及pos的位置
+  df.plot+labs(fill = x)+guides(colour = guide_legend(title.hjust = 0.5))
+}
+
+#stackplot("Road_Type")
+
+stacklist<-list()
+for ( i in sig_cat_var1) {
+  
+  stacklist[[i]]<-stackplot(i)  
+  
+}
+
+#適合呈現的類別圖表,
+do.call(grid.arrange, c(stacklist[1:3], ncol = 2))
+
+
+
+```
+
+### 類別變數分析 (2)
+
+
+
+- 左上呈現車禍的乘客乘坐位置,可以觀察到`單獨駕駛(Not car passenger)`的比例在死亡車禍較高 (96% vs. 92%)
+- 右上呈現`Did_Police_Officer_Attend_Scene_of_Accident`與車禍是否死亡的相關性,可以觀察到在死亡車禍中其警察有去過現場的比例較高 (98% vs. 80%)
+- 左下圖呈現死亡車禍的駕駛性別`男性`佔多數且比例高於非死亡車禍 (84% vs. 66%)
+
+
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+do.call(grid.arrange, c(stacklist[4:6], ncol = 2))
+```
+
+### 其他類別變數
+
+考慮到有些類別變數因無變項定義於網頁上或者類別太多(10類以上)且選項間呈現互斥關係, 較難放入模型內進行建模, 暫且排除掉這些變數後, 剩下16個變數可進行進一步的分析。
+
+
+為了方便加入這些變數資訊於模型中,新增了`risk score`這個新變數, 此變數的概念為, 於這16個變數中, 若資料是屬於死亡車禍中相較於非死亡車禍高比例的類別, 則得1分, 因此得越高分則表示是死亡車禍的機率越大。
+
+
+為了驗證此概念是否正確, 將risk score計算出後, 比較了兩組之間( nonfatal = 0, fata = 1 )的平均值如下, 可觀察到**死亡車禍的risk score平均高於非死亡車禍**
+
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+totaldata<-Reduce(function(x,y) merge(x,y,by='Accident_Index', all.x=TRUE), list(dd,casualties1,vehicle1))
+
+
+
+x=as.POSIXct(strptime(c("000000","050000","110000","160000","190000","235959"),
+                      "%H%M%S"),"UTC") #for time_of_day
+labs=c("night","morning","afternoon","evening","night") #for time_of_day
+
+
+totaldata<- totaldata %>%
+  mutate(fatal=ifelse(Accident_Severity==1,1,0), #fatal=1, other=0
+         time_hms=as.POSIXct(strptime(totaldata$Time,format="%H:%M:%S"),"UTC"), #character to hhmmss
+         weekday=ifelse(Day_of_Week %in% c(1:5),1,0)) %>% #weekday=1, weekend=0
+  mutate(time_of_day=labs[findInterval(time_hms,x)]) # time of day
+
+
+#for risk score
+score_var<-c("1st_Road_Class","Road_Type","Junction_Detail","Junction_Control",
+             "2nd_Road_Class","Light_Conditions","Pedestrian_Crossing-Physical_Facilities",
+             "Skidding_and_Overturning","Vehicle_Leaving_Carriageway",
+             "1st_Point_of_Impact","Urban_or_Rural_Area","Casualty_Class",
+             "Sex_of_Casualty","Car_Passenger",
+             "Did_Police_Officer_Attend_Scene_of_Accident","Sex_of_Driver")
+#"time_of_day")不寫在loop裡面
+
+
+num<-c(3,3,0,4,6,6,0,1,1,1,2,3,1,0,1,1) #各題選項回答多少會得1分
+score_var1<-paste0(score_var,"_1")
+for (i in 1:length(score_var)){
+  totaldata[[score_var1[i]]]<-ifelse(totaldata[[score_var[i]]]==num[i],1,0)
+}
+
+totaldata[["time_of_day_1"]]<-ifelse(totaldata$time_of_day=="night",1,0)
+totaldata$risk_score<-apply(totaldata[,names(totaldata) %in% c(score_var1,"time_of_day_1")], 1, sum)
+
+totaldata%>% group_by(fatal) %>% summarize(mean=mean(risk_score,na.rm=T)) %>% ungroup()
+```
+
+
+進一步進行兩組平均檢定, 也呈現統計顯著性,因此此變數將會放入模型進行建模。
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+t.test(totaldata$risk_score,totaldata$fatal)
+```
+
+
+#### 連續型變數
+
+
+將資料中連續型變數以t-test進行檢定結果如下, 在這11個變數中,除了`Number_of_Vehicle`**無達到統計顯著**之外, 其餘變數皆達上統計顯著, 因此這些將會納入後續的模型建構。
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+
+conti_var<-c(conti1,conti2,conti3[-which(conti3 %in% "Vehicle_Reference")])
+conti_data<-totaldata[,c("fatal",conti_var)]
+conti_data[conti_data<0]<-NA
+conti_table<-conti_data %>% ungroup() %>% 
+  group_by(fatal) %>% summarise_at(conti_var, mean, na.rm = TRUE) %>% 
+  as.data.frame() %>% filter()
+conti_table<-t(conti_table[,2:12])
+
+conti_p<-t(data.frame(lapply(conti_data[,-1], function(x) t.test(x ~ conti_data$fatal)$p.value)))
+conti_table<-as.data.frame(cbind(conti_table,conti_p))
+names(conti_table)<-c("mean_nonfatal","mean_fatal","pvalue")
+conti_table$pvalue<-ifelse(conti_table$pvalue<0.05,"<0.05",">0.05")
+kable(conti_table)
+```
+
+### 新增時間變數
+
+
+資料中有星期與時間的資訊, 便進一步將此資料分成平日與假日以及時間區間的資訊
+
+此二變數與是否發生車禍的關係如下
+
+ - 左邊為死亡車禍與非死亡車禍其平日與假日的比例分佈, 可以發現**平假日的比例分佈在兩組的差異並不大**
+ - 右邊為發生車禍的時段, 在**死亡車禍中深夜發生的比例高於非死亡車禍(33% vs. 21%)**
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+#呈現類別變數的百分比
+#小於0為NA
+cats_table1[cats_table1 < 0] <- NA
+
+#看每個類別變數與fatal之間的percentage
+#類別太多先不看(超過30),Police_Force,Local_Authority_(District),"Local_Authority_(Highway)","LSOA_of_Accident_Location"
+
+cats_freq_table<-c()
+
+for ( i in colnames(cats_table1)[-1]) {
+  temp_cats<-as.data.frame(prop.table(table(cats_table1[[i]],cats_table1[["fatal"]]),margin=2))
+  temp_cats$var<-i
+  cats_freq_table<-rbind(cats_freq_table,temp_cats)
+  rm(temp_cats)
+}
+
+cats_freq_table$percent<-round(cats_freq_table$Freq,5)*100
+cats_freq_table$percent1<-paste0(round(cats_freq_table$Freq,2)*100,"%")
+
+
+#畫出類別少且有顯著差異的變數
+sig_cat_var<-c("weekday",
+               "time_of_day")
+
+cats_freq_table1<-cats_freq_table %>% filter(var %in% sig_cat_var) %>%
+  mutate(pos=case_when(var=="weekday" &Var1==1&Var2==0~75,
+                       var=="weekday" &Var1==0 &Var2==0~20,
+                       var=="weekday" &Var1==1&Var2==1~75,
+                       var=="weekday" &Var1==0 &Var2==1~25,
+                       
+                       
+                       var=="time_of_day" &Var1=="afternoon"&Var2==0~80,
+                       var=="time_of_day" &Var1=="evening" &Var2==0~60,
+                       var=="time_of_day" &Var1=="morning" &Var2==0~35,
+                       var=="time_of_day" &Var1=="night"&Var2==0~12.5,
+                       var=="time_of_day" &Var1=="afternoon"&Var2==1~80,
+                       var=="time_of_day" &Var1=="evening" &Var2==1~60,
+                       var=="time_of_day" &Var1=="morning" &Var2==1~40,
+                       var=="time_of_day" &Var1=="night" &Var2==1~20
+  )) 
+
+
+
+stackplot<-function(x) {
+  plot<-cats_freq_table1 %>% filter (var==x)
+  
+  df.plot <- ggplot(data = plot, aes(x = Var2, y = percent, fill = Var1)) +
+    geom_bar(stat="identity")+ xlab ("fatal") +
+   geom_text(aes(label=percent1, y = pos), size = 4)
+  #df.plot+guides(color=guide_legend(title="Whatever You Want")) legend title尚待修改以及pos的位置
+  df.plot+labs(fill = x)+guides(colour = guide_legend(title.hjust = 0.5))
+}
+
+#stackplot("Road_Type")
+
+stacklist<-list()
+for ( i in sig_cat_var) {
+  
+  stacklist[[i]]<-stackplot(i)  
+  
+}
+
+#適合呈現的類別圖表,
+do.call(grid.arrange, c(stacklist, ncol = 2))
+
+
+
+```
+
+
+### 萃取地理特徵資訊
+
+透過切割經緯度為地理位置分區, 期望大區塊至小區塊分別萃取出不同區域的特性, 預計抽取的資訊有不同區塊的
+
+ - 車禍發生數
+ - 非死亡車禍發生數
+ - 死亡車禍發生數
+ - 車禍時發生死亡事件機率 (死亡車禍發生數/ 車禍發生數)
+ - 時間資訊: 同一區域上次發生車禍為幾天前
+
+因切割後的區域數量過多, 不適合以統計檢定檢視差異, 因此使用視覺化呈現萃取出的區域資訊
+
+檢視方向
+
+1. 區域間是否有差異 - **不同區域所萃取的資訊是否有差異**
+2. 不同切割尺度所得到的資訊是否有差異 - 觀察**相同種類的資訊在不同切割尺度下所得到的結果是否有差異**
+
+因無合適的經緯度間隔判斷標準,暫且分別用0.5, 0.25, 0.1, 0.05 為間隔單位對經緯度切割
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+map_data <- totaldata[c("fatal","Longitude","Latitude")]  %>% mutate(fatal = as.character(fatal)) %>% as_tibble() %>% na.exclude()
+plot_map <- function(TOTALDATA, SEP_CUT, CATE = c("sample_size","fatal_1","fatal_0","fatal_ratio")){
+  
+  cut_seq <- seq(from = min(TOTALDATA$Longitude), to = max(TOTALDATA$Longitude), by = SEP_CUT)
+  Longitude_seq <- findInterval(TOTALDATA$Longitude, cut_seq) 
+  
+  cut_seq <- seq(from = min(TOTALDATA$Latitude), to = max(TOTALDATA$Latitude), by = SEP_CUT)
+  Latitude_seq <- findInterval(TOTALDATA$Latitude, cut_seq) 
+
+  map_data <- TOTALDATA %>% 
+    mutate( Longitude_seq, Latitude_seq ) %>% 
+    group_by( Longitude_seq, Latitude_seq  ) %>% 
+    summarise( sample_size = length(fatal), 
+               fatal_1 = length(which(fatal == 1) ),
+               fatal_0 = length(which(fatal == 0) ),
+               fatal_ratio = fatal_1/sample_size  ) 
+  
+  hmap_data <- map_data %>% select(Longitude_seq, Latitude_seq,CATE) %>% rename( cats = CATE)
+  
+  ggplot(hmap_data, aes(Longitude_seq, Latitude_seq, fill= cats  )) + 
+    geom_tile() +
+    scale_fill_gradient(CATE, low="yellow", high="red") +
+    theme_minimal() +
+    xlab("") +
+    ylab("")
+  
+}
+```
+
+### 發生車禍次數 
+
+可發現不同區塊間的車禍發生數有所差異, 不同尺度下的圖案輪廓則無太大差異, **右下角區塊皆為車禍發生次數較高區域**
+
+```{r message=FALSE, warning=FALSE, ,echo=FALSE}
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) { 
+  library(grid) 
+  
+  # Make a list from the ... arguments and plotlist 
+  plots <- c(list(...), plotlist) 
+  
+  numPlots = length(plots) 
+  
+  # If layout is NULL, then use 'cols' to determine layout 
+  if (is.null(layout)) { 
+    # Make the panel 
+    # ncol: Number of columns of plots 
+    # nrow: Number of rows needed, calculated from # of cols 
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)), 
+                     ncol = cols, nrow = ceiling(numPlots/cols)) 
+  } 
+  
+  if (numPlots==1) { 
+    print(plots[[1]]) 
+    
+  } else { 
+    # Set up the page 
+    grid.newpage() 
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout)))) 
+    
+    # Make each plot, in the correct location 
+    for (i in 1:numPlots) { 
+      # Get the i,j matrix positions of the regions that contain this subplot 
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE)) 
+      
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row, 
+                                      layout.pos.col = matchidx$col)) 
+    } 
+  } 
+}  
+p1 <- plot_map(TOTALDATA = map_data,SEP_CUT = 0.5 ,CATE = "sample_size")  + ggtitle("0.5")
+p2 <- plot_map(TOTALDATA = map_data,SEP_CUT = 0.25 ,CATE = "sample_size") + ggtitle("0.25")
+p3 <- plot_map(TOTALDATA = map_data,SEP_CUT = 0.1 ,CATE = "sample_size")  + ggtitle("0.1")
+p4 <- plot_map(TOTALDATA = map_data,SEP_CUT = 0.05,CATE = "sample_size")  + ggtitle("0.05")
+multiplot(p1, p2, p3, p4, cols = 2)
+```
+
+### 死亡車禍次數
+
+可發現不同區塊間的死亡車禍次數有所差異, 不同尺度下的圖案輪廓也有所差異, 在大尺度範圍下, 右下角為死亡車禍發生數較高的區域, 然而若以小尺度範圍觀察, 則可發現死亡車禍分佈沒有集中在右下角, 證明**不同尺度所得到的死亡車禍次數資訊輪廓不相同**
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+p1 <- plot_map(TOTALDATA = map_data,SEP_CUT = 0.5 ,CATE = "fatal_1")  + ggtitle("0.5")
+p2 <- plot_map(TOTALDATA = map_data,SEP_CUT = 0.25 ,CATE = "fatal_1") + ggtitle("0.25")
+p3 <- plot_map(TOTALDATA = map_data,SEP_CUT = 0.1 ,CATE = "fatal_1")  + ggtitle("0.1")
+p4 <- plot_map(TOTALDATA = map_data,SEP_CUT = 0.05,CATE = "fatal_1")  + ggtitle("0.05")
+multiplot(p1, p2, p3, p4, cols = 2)
+```
+
+### 車禍時發生死亡事件機率
+
+可發現不同區塊間車禍時發生死亡事件機率(死亡車禍發生數/ 車禍發生數)有所差異, 不同尺度下的圖案輪廓有部份相似。大尺度範圍下反而左上角發生車禍時造成死亡事件的機率較高, 而已小尺度範圍觀察發生車禍時高機率造成死亡事件則均勻分布於右下角以外的點, 證明**不同尺度所得到的車禍時發生死亡事件機率資訊輪廓不相同**
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+p1 <- plot_map(TOTALDATA = map_data,SEP_CUT = 0.5 ,CATE = "fatal_ratio")  + ggtitle("0.5")
+p2 <- plot_map(TOTALDATA = map_data,SEP_CUT = 0.25 ,CATE = "fatal_ratio") + ggtitle("0.25")
+p3 <- plot_map(TOTALDATA = map_data,SEP_CUT = 0.1 ,CATE = "fatal_ratio")  + ggtitle("0.1")
+p4 <- plot_map(TOTALDATA = map_data,SEP_CUT = 0.05,CATE = "fatal_ratio")  + ggtitle("0.05")
+multiplot(p1, p2, p3, p4, cols = 2)
+```
+
+整合上述結果可以確認已經**將經緯度以特定間隔劃分區域可確實區分不同區域的特徵, 同時藉由不同切割尺度也可抽取出不同程度的資訊**。
+
+其中以地圖的**右下角推測為交通量較大的地區因此有較高的車禍發生數與死亡車禍發生數,左上角地區則是雖然車禍發生次數低於右下角然而發生車禍時有較高的機率造成死亡事件**,是否可能為右下角是城市地區發生的車禍多為小擦撞不容易造成死亡事件
+
+ps. 仍須注意此差異是否為不同地區的樣本數差異導致各地區計算的機率有所誤差。
+
+
+### 以單一意外為單位觀察藉由不同尺度萃取出的特徵資訊
+
+檢定方向
+
+1. 這些特徵資訊之間是否有相關性
+2. 這些資訊可否協助辨識死亡車禍
+
+### 這些特徵資訊之間是否有相關性
+
+使用spearman相關性檢定
+
+* 相同的特徵在不同尺度下萃取出來的數值是否具有一致的方向性
+* 不同尺度下篩選出來的特徵之間是否有相同的特性
+* 綜合來比較所有特徵間的相關性
+
+
+相同的特徵在不同尺度下萃取出來的數值是否具有一致的方向性, 特徵之間的相關性並沒有隨著尺度減少而等比下降
+
+如: 
+
+-  死亡車禍發生數 由 0.05 間隔所得到的資訊和 0.5, 0.25, 所得到的資訊相關性皆為0.5
+-  車禍時發生死亡事件機率 由 0.5 間隔所得到的資訊和 0.25 所得到的資訊相關性為正相關,然而與 0.25 間隔所得到的資訊相關性為負相關
+
+
+推測**不同尺度下的萃取的特徵並非等比或線性相關**
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+library(Hmisc)
+
+map_info <- function(SEP_CUT){
+  
+  map_data <- totaldata[c("Accident_Index","fatal","Longitude","Latitude")]  %>% mutate(fatal = as.character(fatal)) %>% as_tibble() %>% na.exclude()
+  
+  cut_seq <- seq(from = min(map_data$Longitude), to = max(map_data$Longitude), by = SEP_CUT)
+  Longitude_seq <- findInterval(map_data$Longitude, cut_seq) 
+  
+  cut_seq <- seq(from = min(map_data$Latitude), to = max(map_data$Latitude), by = SEP_CUT)
+  Latitude_seq <- findInterval(map_data$Latitude, cut_seq) 
+  
+  for_join_tbl <- map_data %>% mutate( Longitude_seq, Latitude_seq )
+  
+  map_data <- map_data %>% 
+    mutate( Longitude_seq, Latitude_seq ) %>% 
+    group_by( Longitude_seq, Latitude_seq  ) %>% 
+    summarise( sample_size = length(fatal), 
+               fatal_1 = length(which(fatal == 1) ),
+               fatal_0 = length(which(fatal == 0) ),
+               fatal_ratio = fatal_1/sample_size  ) 
+  
+  res <- full_join(for_join_tbl, map_data, by = c("Longitude_seq" = 'Longitude_seq',"Latitude_seq" = "Latitude_seq")) %>% 
+    select( -fatal, -Longitude, -Latitude, -Longitude_seq, -Latitude_seq)
+  colnames(res)[-1] <- paste(colnames(res)[-1],SEP_CUT,sep="_sep_")
+  res
+}
+
+SEP_CUT = 0.1 
+conti_p_tbl <- tibble(feature = c("sample_size", "fatal_1", "fatal_0", "fatal_ratio","last_time_acc"))
+cats_p_tbl <- tibble(feature = "last_time_fatal")
+confusion_tbl <- list()
+cor_tbl <- list()
+f_last_acc_data <- totaldata[c("Accident_Index","fatal")]
+for( SEP_CUT in c(0.5,0.25, 0.1, 0.05) ){
+  
+  
+  map_data <- totaldata[c("Accident_Index","fatal","Longitude","Latitude","Date")]  %>% mutate(fatal = as.character(fatal)) %>% as_tibble() %>% na.exclude()
+  
+  cut_seq <- seq(from = min(map_data$Longitude), to = max(map_data$Longitude), by = SEP_CUT)
+  Longitude_seq <- findInterval(map_data$Longitude, cut_seq) 
+  
+  cut_seq <- seq(from = min(map_data$Latitude), to = max(map_data$Latitude), by = SEP_CUT)
+  Latitude_seq <- findInterval(map_data$Latitude, cut_seq) 
+  
+  for_join_tbl <- map_data %>% mutate( Longitude_seq, Latitude_seq )
+  
+  last_acc_data <- 
+    map_data %>% 
+    mutate( Longitude_seq, Latitude_seq ) %>% 
+    mutate( Date = as.Date(Date, format = "%d/%m/%Y")) %>% 
+    group_by( Longitude_seq, Latitude_seq ) %>% 
+    arrange( Longitude_seq, Latitude_seq, Date ) %>% 
+    mutate( last_time_acc   = Date - lag(Date) ) %>%  
+    mutate( last_time_fatal = lag(fatal) ) %>%  
+    mutate( last_time_acc = as.numeric(last_time_acc) ) %>% 
+    ungroup() %>% 
+    left_join(.,map_info(SEP_CUT)) %>% 
+    select( -fatal,-Longitude, -Latitude, -Date, -Longitude_seq, -Latitude_seq)
+  
+  colnames(last_acc_data)[colnames(last_acc_data) %in% "last_time_acc"] <- paste("last_time_acc", SEP_CUT,sep ="_")
+  colnames(last_acc_data)[colnames(last_acc_data) %in% "last_time_fatal"] <- paste("last_time_fatal", SEP_CUT,sep ="_")
+  f_last_acc_data <- full_join(
+    f_last_acc_data,
+    last_acc_data, 
+    by = "Accident_Index"
+  ) %>% as_tibble()
+  
+}
+
+
+
+Cor_heatmap <- function(TBL, COLNAME){
+ 
+  tbl <- data.frame(feature = COLNAME, TBL) %>% as_tibble()
+  colnames(tbl) <- c("Feature", COLNAME)
+  tbl <- gather(tbl,COLNAME, key = "cats", value = "value")
+  
+  ggplot(data = tbl, aes(x = cats, y = Feature)) +
+    geom_tile(aes(fill = value)) + 
+    geom_text(aes(label = round(value, 1))) +
+    scale_fill_gradient(low = "white", high = "red") + 
+    theme_void() +
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle=90, hjust=1),
+          axis.text.y = element_text(angle=0, hjust=1) 
+          ) + 
+    # ggtitle()+
+    xlab("") +
+    ylab("")
+  
+}
+
+skip_col <- 
+c(colnames(f_last_acc_data)[grep("sample",colnames(f_last_acc_data))],
+  colnames(f_last_acc_data)[grep("last_time_fatal",colnames(f_last_acc_data))] )
+last_acc_data <- f_last_acc_data
+f_last_acc_data <- f_last_acc_data %>% select(-skip_col)
+feature_rcorr <- function(PATTERN){
+  TBL <- f_last_acc_data[  colnames(f_last_acc_data)[grep(PATTERN,colnames(f_last_acc_data))] ] %>% 
+    as.matrix() %>%
+    rcorr(.,type = "spearman")
+  TBL 
+  }
+
+
+p1 <- feature_rcorr("fatal_1_sep") %>% .$r %>% Cor_heatmap(TBL = .,COLNAME = c("sep 0.5","sep 0.25","sep 0.1","sep 0.05") )+ ggtitle("fatal = 1")
+p2 <- feature_rcorr("fatal_0_sep") %>% .$r %>% Cor_heatmap(TBL = .,COLNAME = c("sep 0.5","sep 0.25","sep 0.1","sep 0.05") )+ ggtitle("fatal = 0")
+p3 <- feature_rcorr("fatal_ratio") %>% .$r %>% Cor_heatmap(TBL = .,COLNAME = c("sep 0.5","sep 0.25","sep 0.1","sep 0.05") )+ ggtitle("fatal ratio")
+p4 <- feature_rcorr("last_time_acc") %>% .$r %>% Cor_heatmap(TBL = .,COLNAME = c("sep 0.5","sep 0.25","sep 0.1","sep 0.05") )+ ggtitle("last_time_acc")
+
+multiplot(p1,p2,p3,p4 ,cols =2)
+
+
+```
+
+
+不同尺度下萃取出來的**特徵間**是否具有一致的方向性, 如果沒有, 代表不同尺度下萃取的特徵間具有獨有的輪廓
+
+如:
+
+非死亡車禍發生數和車禍時發生死亡事件機率, 在**不同的尺度下呈現完全相反的相關性**分別為-0.7,-0.5,0, 0.3
+代表
+
+- 在**小尺度**下, 周圍發生非死亡車禍發生數越**高**, 車禍時發生死亡事件機率越**高**
+- 在**大尺度**下, 周圍發生非死亡車禍發生數越**高**, 車禍時發生死亡事件機率越**低**
+
+推定不同尺度下萃取的特徵間具有獨有的輪廓
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+
+
+
+p1 <- feature_rcorr("0.5")  %>% .$r %>% Cor_heatmap(TBL = .,COLNAME = c('last time acc',"fatal = 1","fatal = 0", "fatal ratio") )+ ggtitle("0.5")
+p2 <- feature_rcorr("0.25") %>% .$r %>% Cor_heatmap(TBL = .,COLNAME = c('last time acc',"fatal = 1","fatal = 0", "fatal ratio") )+ ggtitle("0.25")
+p3 <- feature_rcorr("0.1")  %>% .$r %>% Cor_heatmap(TBL = .,COLNAME = c('last time acc',"fatal = 1","fatal = 0", "fatal ratio") )+ ggtitle("0.1")
+p4 <- feature_rcorr("0.05") %>% .$r %>% Cor_heatmap(TBL = .,COLNAME = c('last time acc',"fatal = 1","fatal = 0", "fatal ratio") )+ ggtitle("0.05")
+
+multiplot(p1,p2,p3,p4 ,cols =2)
+
+
+
+```
+
+
+
+綜合比較所有特徵間的相關性
+
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+
+Cor_heatmap(
+  f_last_acc_data %>% select(-Accident_Index,-fatal) %>% as.matrix() %>% rcorr() %>% .$r,
+  f_last_acc_data %>% select(-Accident_Index,-fatal) %>% colnames()
+)
+
+```
+
+### 這些資訊可否協助辨識死亡車禍
+
+
+以單一意外為單位觀察藉由不同尺度所萃取出的資料是否可協助分類是否為死亡車禍
+觀察我們藉由不同尺度下所萃取得來的資料是否可以協助區分 fatal, nonfatal的車禍
+
+- 以T-test檢定**不同區域尺度下死亡車禍和一般車禍上次發生車禍的時間是否有差異?**
+
+可以發現兩組別的平均值並沒有隨著尺度降低等比例衰減,再次驗證不同尺度所翠取出的資料具有不同輪廓且所有的變數在死亡車禍與非死亡車禍間**均有顯著差異**
+
+值得注意的是 
+
+- **時間資訊: 同一區域上次發生車禍為幾天前(`last_time_acc`) 在 死亡車禍(fatal) 與 非死亡車禍(nonfatal) 上呈現的差異**, 死亡車禍(fatal)組的 `last_time_acc` 在不同尺度下都**高**於 非死亡車禍(nonfatal) 組, 是否一個地區常常發生小擦撞, 駕駛開車就會相對小心, 避免造成嚴重意外
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+conti_var <- colnames(f_last_acc_data)[c(-1:-2)]
+conti_data <- f_last_acc_data[,c("fatal",conti_var)]
+
+conti_table <- conti_data %>%
+  ungroup() %>% 
+  group_by(fatal) %>% summarise_at(conti_var, mean, na.rm = TRUE) %>% 
+  as.data.frame() %>% filter()
+conti_table<-t(conti_table[,-1])
+
+conti_p<-t(data.frame(lapply(conti_data[,-1], function(x) t.test(x ~ conti_data$fatal)$p.value)))
+conti_table<-as.data.frame(cbind(conti_table,conti_p))
+
+names(conti_table)<-c("mean_nonfatal","mean_fatal","pvalue")
+conti_table$pvalue<-ifelse(conti_table$pvalue<0.05,"<0.05",">0.05")
+
+conti_table
+
+```
+
+
+### 地理資訊整合 
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+select_type_map <- function(SEP_CUT, TYPE, CLASS, FATAL = T){
+  
+  map_info_sep <- function(SEP_CUT){
+    
+    map_data <- totaldata[c("Accident_Index","fatal","Longitude","Latitude")]  %>% mutate(fatal = as.character(fatal)) %>% as_tibble() %>% na.exclude()
+    
+    cut_seq <- seq(from = min(map_data$Longitude), to = max(map_data$Longitude), by = SEP_CUT)
+    Longitude_seq <- findInterval(map_data$Longitude, cut_seq) 
+    
+    cut_seq <- seq(from = min(map_data$Latitude), to = max(map_data$Latitude), by = SEP_CUT)
+    Latitude_seq <- findInterval(map_data$Latitude, cut_seq) 
+    
+    for_join_tbl <- map_data %>% mutate( Longitude_seq, Latitude_seq )
+    
+    map_data <- map_data %>% 
+      mutate( Longitude_seq, Latitude_seq ) %>% 
+      group_by( Longitude_seq, Latitude_seq  ) %>% 
+      summarise( sample_size = length(fatal), 
+                 fatal_1 = length(which(fatal == 1) ),
+                 fatal_0 = length(which(fatal == 0) ),
+                 fatal_ratio = fatal_1/sample_size  ) 
+    
+    res <- full_join(for_join_tbl, map_data, by = c("Longitude_seq" = 'Longitude_seq',"Latitude_seq" = "Latitude_seq")) %>% 
+      select( -fatal, -Longitude, -Latitude)
+    res
+  }
+  tmp <- totaldata[c("Accident_Index","fatal", TYPE)] %>% left_join(., map_info_sep(SEP_CUT), by = "Accident_Index")
+  colnames(tmp)[3] <- "types"
+  hmap_data <- tmp %>%
+    filter(types %in% CLASS) %>% 
+    group_by(Longitude_seq,Latitude_seq) %>%
+    summarise(
+      sample_size = length(fatal), 
+      fatal_1 = length(which(fatal == 1) ),
+      fatal_0 = length(which(fatal == 0) ),
+      fatal_ratio = fatal_1/sample_size 
+    )
+  if ( FATAL ){
+    ggplot(hmap_data, aes(Longitude_seq, Latitude_seq, fill= fatal_ratio  )) + 
+      geom_tile() +
+      scale_fill_gradient("fatal_ratio", low="yellow", high="red") +
+      theme_minimal() +
+      xlab("") +
+      ylab("")
+  } else {
+    ggplot(hmap_data, aes(Longitude_seq, Latitude_seq, fill= sample_size  )) + 
+      geom_tile() +
+      scale_fill_gradient("sample_size", low="yellow", high="red") +
+      theme_minimal() +
+      xlab("") +
+      ylab("")
+  }
+
+  
+}
+
+```
+
+整合基礎變數檢定中具特色的變數和地理位置資訊
+
+#### Urban_or_Rural_Area
+
+鄉村或城市, 因鄉村`Rural`和城市`Urban`本來就是地理特徵, 但觀察到的並沒有明顯區隔, 判斷以0.5作為切割尺度不足以區分鄉村與城市
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+p1 <- select_type_map(SEP_CUT = 0.5, TYPE = "Urban_or_Rural_Area" ,CLASS = 1, FATAL=T) + ggtitle("Urban")
+p2 <- select_type_map(SEP_CUT = 0.5, TYPE = "Urban_or_Rural_Area" ,CLASS = 2, FATAL=T) + ggtitle("Rural")
+p3 <- select_type_map(SEP_CUT = 0.5, TYPE = "Urban_or_Rural_Area" ,CLASS = 1, FATAL=F) + ggtitle("Urban")
+p4 <- select_type_map(SEP_CUT = 0.5, TYPE = "Urban_or_Rural_Area" ,CLASS = 2, FATAL=F) + ggtitle("Rural")
+multiplot(p1, p2, p3,p4, cols = 2)
+
+```
+
+#### Casualty_Class
+
+
+可以發現發生意外時車輛駕駛, 乘客, 行人的分佈沒有地理上的差異, 然而死亡的機率車輛駕駛, 乘客, 行人間卻有地理上的差異
+
+例如: 
+
+- 行人於約 (x,y) = (10, 15) 區域具有異常高的車禍死亡率(約50%)
+- 乘客於約 (x,y) = (7, 5) 與區域具有異常高的車禍死亡率(約30%)
+
+ 
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+p1 <- select_type_map(SEP_CUT = 0.5, TYPE = "Casualty_Class" ,CLASS = 1, FATAL=T) + ggtitle("Driver or rider") 
+p2 <- select_type_map(SEP_CUT = 0.5, TYPE = "Casualty_Class" ,CLASS = 2, FATAL=T) + ggtitle("Passenger")
+p3 <- select_type_map(SEP_CUT = 0.5, TYPE = "Casualty_Class" ,CLASS = 3, FATAL=T) + ggtitle("Pedestrian")
+p4 <- select_type_map(SEP_CUT = 0.5, TYPE = "Casualty_Class" ,CLASS = 1, FATAL=F) + ggtitle("Driver or rider")
+p5 <- select_type_map(SEP_CUT = 0.5, TYPE = "Casualty_Class" ,CLASS = 2, FATAL=F) + ggtitle("Passenger")
+p6 <- select_type_map(SEP_CUT = 0.5, TYPE = "Casualty_Class" ,CLASS = 3, FATAL=F) + ggtitle("Pedestrian")
+multiplot(p1, p2, p3,p4,p5,p6 ,cols = 2)
+
+```
+
+
+#### Sex_of_Casualty
+
+發生意外時傷亡對象的性別分佈沒有地理上的差異, 然而死亡的機率卻有地理上的差異
+ 
+- 女性於約 (x,y) = (7, 16) 與區域具有異常高的車禍死亡率(約50%)
+- 男性則均勻分佈於右上角(車禍死亡率均低20%)
+
+
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+p1 <- select_type_map(SEP_CUT = 0.5, TYPE = "Sex_of_Casualty" ,CLASS = 1, FATAL=T) + ggtitle("Male") 
+p2 <- select_type_map(SEP_CUT = 0.5, TYPE = "Sex_of_Casualty" ,CLASS = 2, FATAL=T) + ggtitle("Female") 
+p3 <- select_type_map(SEP_CUT = 0.5, TYPE = "Sex_of_Casualty" ,CLASS = 1, FATAL=F) + ggtitle("Male") 
+p4 <- select_type_map(SEP_CUT = 0.5, TYPE = "Sex_of_Casualty" ,CLASS = 2, FATAL=F) + ggtitle("Female") 
+multiplot(p1, p2, p3,p4, cols = 2)
+
+```
+
+#### Car_Passenger
+
+發生意外時傷亡對象的座位分佈沒有地理上的差異, 然而死亡的機率卻有地理上的差異
+
+例如: 
+
+- 前座乘客於約 (x,y) = (8, 16) 區域具有異常高的車禍死亡率(約50%)
+- 後座乘客於約 (x,y) = (4, 14) 與區域具有異常高的車禍死亡率(約35%)
+- 駕駛則均勻分佈於右上角(車禍死亡率均低20%)
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+
+p1 <- select_type_map(SEP_CUT = 0.5, TYPE = "Car_Passenger" ,CLASS = 0, FATAL=T)+ ggtitle("Not car passenger") 
+p2 <- select_type_map(SEP_CUT = 0.5, TYPE = "Car_Passenger" ,CLASS = 1, FATAL=T)+ ggtitle("Front seat passenger") 
+p3 <- select_type_map(SEP_CUT = 0.5, TYPE = "Car_Passenger" ,CLASS = 2, FATAL=T)+ ggtitle("Rear seat passenger") 
+p4 <- select_type_map(SEP_CUT = 0.5, TYPE = "Car_Passenger" ,CLASS = 0, FATAL=F)+ ggtitle("Not car passenger") 
+p5 <- select_type_map(SEP_CUT = 0.5, TYPE = "Car_Passenger" ,CLASS = 1, FATAL=F)+ ggtitle("Front seat passenger") 
+p6 <- select_type_map(SEP_CUT = 0.5, TYPE = "Car_Passenger" ,CLASS = 2, FATAL=F)+ ggtitle("Rear seat passenger") 
+multiplot(p1, p2, p3,p4,p5,p6, cols = 2)
+
+```
+
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+
+# p1 <- select_type_map(SEP_CUT = 0.5, TYPE = "Did_Police_Officer_Attend_Scene_of_Accident" ,CLASS = 1, FATAL=T)+ ggtitle("Yes") 
+# p2 <- select_type_map(SEP_CUT = 0.5, TYPE = "Did_Police_Officer_Attend_Scene_of_Accident" ,CLASS = 2, FATAL=T)+ ggtitle("No") 
+# p3 <- select_type_map(SEP_CUT = 0.5, TYPE = "Did_Police_Officer_Attend_Scene_of_Accident" ,CLASS = 3, FATAL=T)+ ggtitle("self rep only") 
+# p4 <- select_type_map(SEP_CUT = 0.5, TYPE = "Did_Police_Officer_Attend_Scene_of_Accident" ,CLASS = 1, FATAL=F)+ ggtitle("Yes") 
+# p5 <- select_type_map(SEP_CUT = 0.5, TYPE = "Did_Police_Officer_Attend_Scene_of_Accident" ,CLASS = 2, FATAL=F)+ ggtitle("No") 
+# p6 <- select_type_map(SEP_CUT = 0.5, TYPE = "Did_Police_Officer_Attend_Scene_of_Accident" ,CLASS = 3, FATAL=F)+ ggtitle("self rep only") 
+# multiplot(p1, p2, p3,p4,p5,p6, cols = 2)
+# 
+
+```
+
+#### Sex_of_Driver
+
+發生意外時駕駛的性別分佈沒有地理上的差異, 然而不同地區造成死亡車禍的駕駛性別卻有差異
+ 
+- 女性駕駛於約 (x,y) = (7, 16) 與區域具有異常高的機率造成死亡車禍(約50%)
+- 男性駕駛則均勻分佈於右上角(造成死亡車禍機率均低30%)
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+
+p1 <- select_type_map(SEP_CUT = 0.5, TYPE = "Sex_of_Driver" ,CLASS = 1, FATAL=T) + ggtitle("Male") 
+p2 <- select_type_map(SEP_CUT = 0.5, TYPE = "Sex_of_Driver" ,CLASS = 2, FATAL=T) + ggtitle("Female") 
+p3 <- select_type_map(SEP_CUT = 0.5, TYPE = "Sex_of_Driver" ,CLASS = 1, FATAL=F) + ggtitle("Male") 
+p4 <- select_type_map(SEP_CUT = 0.5, TYPE = "Sex_of_Driver" ,CLASS = 2, FATAL=F) + ggtitle("Female") 
+multiplot(p1, p2, p3,p4, cols = 2)
+
+
+```
+
+#### time_of_day
+
+發生意外時的時段分佈沒有地理上的差異, 然而死亡的機率卻有地理上的差異
+
+- 約 (x,y) = (4, 15) 區域night具有異常高的機率造成死亡車禍(約100%)
+- 約 (x,y) = (6, 6) 區域morning具有異常高的機率造成死亡車禍(約100%)
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+
+p1 <- select_type_map(SEP_CUT = 0.5, TYPE = "time_of_day" ,CLASS = "evening", FATAL=T) + ggtitle("evening") 
+p2 <- select_type_map(SEP_CUT = 0.5, TYPE = "time_of_day" ,CLASS = "morning", FATAL=T) + ggtitle("morning") 
+p3 <- select_type_map(SEP_CUT = 0.5, TYPE = "time_of_day" ,CLASS = "evening", FATAL=F) + ggtitle("evening") 
+p4 <- select_type_map(SEP_CUT = 0.5, TYPE = "time_of_day" ,CLASS = "morning", FATAL=F) + ggtitle("morning") 
+multiplot(p1, p2, p3,p4, cols = 2)
+
+p1 <- select_type_map(SEP_CUT = 0.5, TYPE = "time_of_day" ,CLASS = "afternoon", FATAL=T) + ggtitle("afternoon") 
+p2 <- select_type_map(SEP_CUT = 0.5, TYPE = "time_of_day" ,CLASS = "night", FATAL=T) + ggtitle("night") 
+p3 <- select_type_map(SEP_CUT = 0.5, TYPE = "time_of_day" ,CLASS = "afternoon", FATAL=F) + ggtitle("afternoon") 
+p4 <- select_type_map(SEP_CUT = 0.5, TYPE = "time_of_day" ,CLASS = "night", FATAL=F) + ggtitle("night") 
+multiplot(p1, p2, p3,p4, cols = 2)
+
+
+```
+
+### 建立基礎模型
+
+
+目的
+
+測試萃取出的地理時間資訊與`risk score`可否協助增加預測車禍發生時是否會造成死亡事件的準確度
+
+方法
+以基礎變項建立模型(Base Model)預測車禍發生時是否會造成死亡事件後加入萃取出的地理時間資訊與`risk score`等資訊以相同的條件重新建模比較兩個模型的精確度
+
+
+Model : 使用R `caret` 套件建模, 模型類別使用CART, 不對類別變項轉換, 不調整超參數
+
+DataSet : 從資料中隨機抽選 80% 為訓練集, 20% 為測試集
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+cats1  <- c("Police_Force","Accident_Severity","Local_Authority_(District)","Local_Authority_(Highway)",
+            "1st_Road_Class","Road_Type", "Junction_Detail","Junction_Control", "2nd_Road_Class", 
+            "Pedestrian_Crossing-Human_Control", "Pedestrian_Crossing-Physical_Facilities",
+            "Light_Conditions", "Weather_Conditions", "Road_Surface_Conditions",
+            "Special_Conditions_at_Site", "Carriageway_Hazards", "Urban_or_Rural_Area", 
+            "Did_Police_Officer_Attend_Scene_of_Accident", "LSOA_of_Accident_Location"
+)
+
+
+cats2  <- c("Casualty_Class","Sex_of_Casualty","Pedestrian_Location","Pedestrian_Movement",
+            "Casualty_Severity","Car_Passenger","Bus_or_Coach_Passenger","Pedestrian_Road_Maintenance_Worker",
+            "Casualty_Type","Casualty_Home_Area_Type")
+
+
+cats3<-c("Vehicle_Type","Towing_and_Articulation","Vehicle_Manoeuvre","Vehicle_Location-Restricted_Lane",
+         "Junction_Location","Skidding_and_Overturning","Hit_Object_in_Carriageway","Vehicle_Leaving_Carriageway",
+         "Hit_Object_off_Carriageway","1st_Point_of_Impact","1st_Point_of_Impact","Journey_Purpose_of_Driver",
+         "Sex_of_Driver","Propulsion_Code","Driver_IMD_Decile","Driver_Home_Area_Type")
+
+
+conti_var<-c(conti1,conti2,conti3[-which(conti3 %in% "Vehicle_Reference")])
+
+
+```
+
+
+**Base Model 使用變數有32個**
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+all_data <- totaldata %>% as_tibble() %>%
+  select("Accident_Index","fatal",c(cats1,cats2,cats3,conti_var, "risk_score","Longitude","Latitude"))
+
+unused_in_model <- c(
+  "Accident_Severity", "Casualty_Severity","Pedestrian_Crossing-Human_Control","Special_Conditions_at_Site","Carriageway_Hazards",      "LSOA_of_Accident_Location","Local_Authority_(Highway)","Local_Authority_(District)","Police_Force" )
+
+score_var <- c("1st_Road_Class","Road_Type","Junction_Detail","Junction_Control",
+               "2nd_Road_Class","Light_Conditions","Pedestrian_Crossing-Physical_Facilities",
+               "Skidding_and_Overturning","Vehicle_Leaving_Carriageway",
+               "1st_Point_of_Impact","Urban_or_Rural_Area","Casualty_Class",
+               "Sex_of_Casualty","Car_Passenger",
+               "Did_Police_Officer_Attend_Scene_of_Accident","Sex_of_Driver")
+all_data <- all_data %>% select(-unused_in_model,-score_var)
+
+base_col <- colnames(all_data)[! colnames(all_data) %in% c("Accident_Index","fatal","risk_score")]
+
+
+print(base_col)
+
+
+```
+
+
+**加入新的資訊後使用變數有48個**
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+# add map info
+all_data <-
+  all_data %>%
+  right_join(., map_info(0.05), by = "Accident_Index") %>%
+  right_join(., map_info(0.1), by = "Accident_Index") %>%
+  right_join(., map_info(0.25), by = "Accident_Index") %>%
+  right_join(., map_info(0.5), by = "Accident_Index") %>%
+  drop_na()
+all_data <- all_data  %>% select(-Accident_Index)
+
+adv_col <-  colnames(all_data)[! colnames(all_data) %in% c("Accident_Index","fatal")]
+print(adv_col)
+```
+
+**Training Set 和 Testing Set 的數量與死亡車禍的分佈**
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+
+set.seed(1234)
+all_data <- all_data %>% drop_na
+test_id <- sample(1:nrow(all_data), 0.2*nrow(all_data))
+train_data <- all_data[-test_id,] %>% mutate(fatal = as.factor(fatal))
+test_data <- all_data[test_id,] %>% mutate(fatal = as.factor(fatal))
+
+print( paste( " Sample size in training set =", train_data %>% nrow(), sep = " " ) )
+print( paste( " Sample size in testing set =" , test_data %>% nrow(), sep = " " ) )
+
+print( paste( " Number of fatal in training set is"   , train_data %>% filter(fatal == 1 ) %>% nrow(), sep = " " ) )
+print( paste( " Number of nonfatal in training set is", train_data %>% filter(fatal == 0 ) %>% nrow(), sep = " " ) )
+
+print( paste( " Number of fatal in testing set is"   , test_data %>% filter(fatal == 1 ) %>% nrow(), sep = " " ) )
+print( paste( " Number of nonfatal in testing set is", test_data %>% filter(fatal == 0 ) %>% nrow(), sep = " " ) )
+
+```
+
+
+可以發現, Fatal 和 Nonfatal 的比例相差極大, 因此在建模時使用了 SMOTE 對training set中的樣本分佈進行在平衡後才放入模型訓練, 最後於未經 SMOTE 調整的 testing set 驗證模型效果
+
+
+### Base model 於 testing set 的表現
+
+
+模型在 Sensitivity 有很好的表現 91% 然而 Specificity 的表現極差 44%, 顯示模型在找出非死亡車禍(`0`)上有很好的表現, 卻**不能很好的預測出實際上造成死亡的車禍(`1`)**, 整體而言模型預測的結果傾向於預測出非死亡車禍。顯然**和整體目標預測出死亡車禍**不大符合
+
+變數的重要程度可以發現最重要的前五個變數分別為
+
+- Speed_limit
+- Vehicle_Reference
+- Vehicle_Type
+- Hit_Object_off_Carriageway
+- Casualty_Type
+
+ 
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+
+
+
+library(caret)
+library(doParallel)
+cl <- makePSOCKcluster(20)
+registerDoParallel(cl)
+
+fitControl <- trainControl( method = "repeatedcv",
+                            number = 2,
+                            repeats = 2 ,
+                            ## Estimate class probabilities
+                            classProbs = TRUE,
+                            ## Evaluate performance using
+                            ## the following function
+                            sampling = "smote",
+                            summaryFunction = twoClassSummary#, # summaryFunction for compute the sensitivty/ specificity and ROC
+                            
+)
+
+
+
+X = train(    y = train_data$fatal%>% as.factor() %>% make.names() ,
+              x = train_data %>% select(base_col) %>% as.data.frame()  ,
+              # for make.names() reference
+              # https://stackoverflow.com/questions/18402016/error-when-i-try-to-predict-class-probabilities-in-r-caret/36573563
+              method = "rpart", # input different "code", base on the regression you used
+              trControl = fitControl, # cross validation ,
+              # tuneGrid = Model_control,
+              metric = "ROC"#,
+              ## Now specify the exact models
+              ## to evaluate:
+              
+)
+stopCluster(cl)
+
+gbmImp <- varImp(X, scale = FALSE)
+
+pre <- predict(X, newdata = test_data[,-1] %>%  as.data.frame() ) 
+mm <- pre == "X1"
+confusionMatrix(data =   mm %>% as.numeric() %>% as.factor(),
+                reference = test_data$fatal %>% as.factor())
+
+plot(gbmImp, top = 20)
+```
+
+
+
+### 加入新的變數 於 testing set 的表現
+
+
+模型在 Sensitivity 稍微降低了(由 91% 降至 89%) 然而 **Specificity 卻大幅提升(由44% 升高至 81%)** , 顯示模型加入新萃取的變數後能大幅的接近原先的目標 - 找出會造成死亡事件的車禍 (準確度上升37%) 
+
+模型中變數的重要程度也發生改變, 前五項重要的變數為
+
+- **fatal_ratio_sep_0.05 (以0.05為間隔對經緯度劃分區域, 該區域內發生車禍時造成死亡的機率)**
+- **fatal_1_sep_0.05 (以0.05為間隔對經緯度劃分區域, 該區域內死亡車禍時發生數)**
+- Hit_Object_off_Carriageway
+- Speed_limit
+- **fatal_ratio_sep_0.1 (以0.05為間隔對經緯度劃分區域, 該區域內發生車禍時造成死亡的機率)**
+
+
+**5項變數中有3項是萃取出來的新變數**, 顯示萃取出來的新變數確實在模型中扮演重要的角色
+
+
+```{r ,echo=FALSE, message=FALSE, warning=FALSE}
+
+
+
+library(caret)
+library(doParallel)
+cl <- makePSOCKcluster(20)
+registerDoParallel(cl)
+
+fitControl <- trainControl( method = "repeatedcv",
+                            number = 2,
+                            repeats = 2 ,
+                            ## Estimate class probabilities
+                            classProbs = TRUE,
+                            ## Evaluate performance using
+                            ## the following function
+                            sampling = "smote",
+                            summaryFunction = twoClassSummary#, # summaryFunction for compute the sensitivty/ specificity and ROC
+                            
+)
+
+
+
+X = train(    y = train_data$fatal%>% as.factor() %>% make.names() ,
+              x = train_data %>% select(adv_col) %>% as.data.frame()  ,
+              # for make.names() reference
+              # https://stackoverflow.com/questions/18402016/error-when-i-try-to-predict-class-probabilities-in-r-caret/36573563
+              method = "rpart", # input different "code", base on the regression you used
+              trControl = fitControl, # cross validation ,
+              # tuneGrid = Model_control,
+              metric = "ROC"#,
+              ## Now specify the exact models
+              ## to evaluate:
+              
+)
+stopCluster(cl)
+
+gbmImp <- varImp(X, scale = FALSE)
+
+pre <- predict(X, newdata = test_data[,-1] %>%  as.data.frame() ) 
+mm <- pre == "X1"
+
+confusionMatrix(data =   mm %>% as.numeric() %>% as.factor(),
+                reference = test_data$fatal %>% as.factor())
+
+plot(gbmImp, top = 20)
+
+
+```
+
+### 結語 與 改進方向
+
+
+此次分析針對資料集中是否為死亡車禍進行了簡單的探索式分析與萃取出新的變數, 做了以下幾種嘗試
+
+1. 分析資料集中哪些變數在是否為死亡車禍的表現有所差異
+2. 抽取出新的時間變數(早中晚, 是否為週末)
+3. 抽出地理資訊(如: 不同區域範圍內車禍發生數)
+4. 觀察抽取出來的地理資訊與基礎變數間的關係 
+
+而後驗證新萃取出的時間變數與地理資訊可否協助判斷死亡車禍的出現, 並在測試的資料集中獲得良好的成效(對死亡車禍判斷提升 37% 準確度)。然而過程中仍有許多想法與改進方向因為時間的緣故無法實作, 
+
+以下是可能的改進方向
+
+- **更改分類 training set和testing set 方式**, 目前的方式是在一整年中隨機抽選, 以此模型建立目的應為預測未來發生車禍時是否為致死車禍, 因此應以過去資料作為training set (如: 1-11月), 未來的資料作為 testing set (12月)
+
+- **藉由原有變數新增其他變數**, 像是目前只萃取不同尺度下該地區距離上次距離車禍多久, 可萃取更多不同的時間資料, 如: 該地區中7天內車禍發生數, 14天內車禍發生數, 7天內死亡車禍發生數, 14天內死亡車禍發生數, 距離上次發生死亡車禍多久
+
+- **檢驗地理與變數間是否有交互作用**, 由上述圖表可推測地理與變數間可能存在交互作用關係, 因此未來可進一步藉由統計方法檢驗是否存在此相關性, 若具有此相關性, 未來在改善模型時也可一併納入此交互作用的因素
+
+- **新增其他年份資料**, 環境與交通狀況應會隨著時間改變, 因此未來應納入其他年份資料進行建模
+
+- **測試不同樣本比例訓練與測試模型**, 本次使用SMOTE處理樣本不平衡問題, 使用後的模型準確度相較於baseline模型有大幅的改進, 未來應可嘗試不同合成樣本比例下的結果, 以得到更好的模型
+
+- **新增外部變數**, 像是車禍發生日期的天氣狀況, 包含濕度, 氣溫等, 這些資料可以從官方歷史資料下載,並放入模型進行預測
+
+
+
+
+
+
+
